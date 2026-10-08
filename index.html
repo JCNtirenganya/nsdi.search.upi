@@ -75,8 +75,10 @@ const CONFIG = {
 
   // "View on map" button -> your Experience Builder app
   expUrl:          "https://experience.arcgis.com/experience/19333efca3744cf3ab27ba4da073d49f",
-  expDataSourceId: "",      // BEST: parcel data source ID in the app (selects + zooms to the parcel). See notes.
-  expMapWidgetId:  "map_1", // FALLBACK: map widget ID in the app (map_1 is the default); zooms to the parcel's centre
+  expMapWidgetId:  "widget_7", // your map widget ID (from the app URL). Blank = auto-detect; comma-separate several IDs if needed
+  expSelect:       true,    // select (highlight) the parcel in the app. Data source IDs are auto-detected from the web map
+  expMarker:       true,    // fallback marker, used only when no parcel data source could be found
+  expDataSourceId: "",      // OPTIONAL override: parcel layer data source ID(s) in the app, comma-separated
   expTarget:       "_blank" // "_blank" = new tab, "_top" = replace the whole page
 };
 /* ========================================= */
@@ -85,7 +87,7 @@ const CONFIG = {
 const layerCache = {};
 async function getLayer(key) {
   if (layerCache[key]) return layerCache[key];
-  try { const c = JSON.parse(localStorage.getItem("lu_" + key)); if (c && c.url) return (layerCache[key] = c); } catch (e) {}
+  try { const c = JSON.parse(localStorage.getItem("lu_" + key)); if (c && c.url && Date.now() - (c.t || 0) < 864e5) return (layerCache[key] = c); } catch (e) {}
   const direct = CONFIG[key === "parcels" ? "parcelUrl" : "planUrl"];
   let url = direct;
   if (!url) {
@@ -97,7 +99,7 @@ async function getLayer(key) {
   }
   const info = await (await fetch(url + "?f=json")).json();
   if (info.error) throw new Error("Layer is not accessible (" + (info.error.message || "error") + "). Make sure it is shared publicly");
-  layerCache[key] = { url, fields: (info.fields || []).map(f => f.name) };
+  layerCache[key] = { t: Date.now(), url, fields: (info.fields || []).map(f => f.name) };
   try { localStorage.setItem("lu_" + key, JSON.stringify(layerCache[key])); } catch (e) {}
   return layerCache[key];
 }
@@ -114,6 +116,7 @@ function openDlg() {
   overlay.hidden = false;
   $("upi").focus();
   getLayer("parcels").catch(() => {}); getLayer("plan").catch(() => {});
+  findMapWidgets().catch(() => {});
 }
 function closeDlg() { overlay.hidden = true; openBtn.focus(); }
 openBtn.onclick = openDlg;
@@ -170,21 +173,88 @@ async function fetchAllPlan(parcelGeom, planUrl, outFields) {
   return feats;
 }
 
-function buildMapUrl(upi, parcel, upiField) {
-  const base = CONFIG.expUrl.replace(/\/$/, "") + "/";
-  if (CONFIG.expDataSourceId) {
-    const w = `where:${CONFIG.expDataSourceId}:${upiField}="${upi.replace(/"/g, "")}"`;
-    return base + "#data_s=" + encodeURIComponent(w) + "&zoom_to_selection=true";
-  }
+// ---- "View on map" link (Experience Builder URL parameters) ----
+// Delimiters (: , & =) stay plain; only characters inside values are encoded.
+const enc = s => encodeURIComponent(s).replace(/['()!*]/g, c => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+
+async function getJSON(url, ms = 6000) {
+  const ctrl = new AbortController(), t = setTimeout(() => ctrl.abort(), ms);
+  try { return await (await fetch(url, { signal: ctrl.signal })).json(); } finally { clearTimeout(t); }
+}
+
+// The published Experience config: lists the map widget(s) and the web map behind them
+let expCfg = null;
+async function getExpConfig() {
+  if (expCfg) return expCfg;
+  const m = CONFIG.expUrl.match(/\/experience\/([0-9a-f]{32})/i);
+  if (!m) return null;
+  try { expCfg = await getJSON(`${CONFIG.portal}/sharing/rest/content/items/${m[1]}/data?f=json`); }
+  catch (e) { console.warn("Could not read the Experience config", e); }
+  return expCfg;
+}
+
+async function findMapWidgets() {
+  const cfg = await getExpConfig();
+  const found = Object.entries((cfg && cfg.widgets) || {})
+    .filter(([, w]) => /arcgis-map\/?$/.test((w && (w.uri || (w.manifest && w.manifest.name))) || ""))
+    .map(([id, w]) => { const u = (w.useDataSources || [])[0] || {}; return { id, ds: u.mainDataSourceId || u.dataSourceId || "" }; });
   if (CONFIG.expMapWidgetId) {
-    const [x, y] = turf.centroid(parcel).geometry.coordinates;
-    const [minX, minY, maxX, maxY] = turf.bbox(parcel);
-    const size = Math.max(turf.distance([minX, minY], [maxX, minY]), turf.distance([minX, minY], [minX, maxY])) * 1000; // metres
-    const scale = size < 50 ? 1000 : size < 200 ? 2500 : size < 500 ? 5000 : size < 1500 ? 10000 : 25000;
-    const vp = { rotation: 0, scale, targetGeometry: { spatialReference: { wkid: 4326 }, x, y } };
-    return base + "#" + CONFIG.expMapWidgetId + "=viewpoint:" + encodeURIComponent(JSON.stringify(vp));
+    return CONFIG.expMapWidgetId.split(",").map(x => x.trim()).filter(Boolean)
+      .map(id => found.find(f => f.id === id) || { id, ds: "" });
   }
-  return base;
+  return found.length ? found : [{ id: "map_1", ds: "" }];
+}
+
+// Work out the data source ID(s) of the parcel layer inside the app's web map.
+// Both known ID shapes are returned (with and without the widget prefix); unknown IDs are simply ignored by the app.
+const webMapCache = {};
+async function parcelDataSourceIds(mapDs, widgetId) {
+  if (CONFIG.expDataSourceId) return CONFIG.expDataSourceId.split(",").map(x => x.trim()).filter(Boolean);
+  try {
+    const cfg = await getExpConfig();
+    const ds = cfg && cfg.dataSources && cfg.dataSources[mapDs];
+    if (!ds || !ds.itemId) return [];
+    const wm = webMapCache[ds.itemId] || (webMapCache[ds.itemId] = await getJSON(`${CONFIG.portal}/sharing/rest/content/items/${ds.itemId}/data?f=json`));
+    const pl = await getLayer("parcels");
+    const norm = u => String(u || "").toLowerCase().replace(/\/$/, "");
+    const hits = [];
+    const walk = ls => (ls || []).forEach(l => {
+      if ((l.url && norm(l.url) === norm(pl.url)) || (l.itemId && l.itemId === CONFIG.parcels.itemId)) hits.push(l.id);
+      walk(l.layers);
+    });
+    walk(wm.operationalLayers);
+    return hits.flatMap(id => [`${mapDs}-${id}`, `${widgetId}-${mapDs}-${id}`]);
+  } catch (e) { console.warn("Could not work out the parcel data source ID", e); return []; }
+}
+
+async function buildMapUrl(upi, parcel, upiField) {
+  const base = CONFIG.expUrl.split(/[?#]/)[0].replace(/\/$/, "") + "/";
+  const widgets = await findMapWidgets();
+
+  // Centre + scale on every map widget (this also makes the zoom reliable)
+  const [lon, lat] = turf.centroid(parcel).geometry.coordinates;
+  const [minX, minY, maxX, maxY] = turf.bbox(parcel);
+  const size = Math.max(turf.distance([minX, minY], [maxX, minY]), turf.distance([minX, minY], [minX, maxY])) * 1000; // metres
+  const scale = Math.max(500, Math.ceil(size * 10 / 100) * 100);
+  const R = 6378137;
+  const x = lon * Math.PI / 180 * R;
+  const y = Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360)) * R;   // Web Mercator (102100)
+
+  // Select the parcel by UPI in the app's parcel layer
+  const sel = CONFIG.expSelect
+    ? [...new Set((await Promise.all(widgets.map(w => parcelDataSourceIds(w.ds, w.id)))).flat())]
+    : [];
+
+  let val = `center:${enc(x.toFixed(2) + "," + y.toFixed(2) + ",102100")},scale:${scale}`;
+  if (CONFIG.expMarker && !sel.length) val += `,marker:${enc(lon.toFixed(7) + "," + lat.toFixed(7) + ";;" + upi + ";" + upi)}`;
+  const parts = widgets.map(w => `${w.id}=${val}`);
+  if (sel.length) {
+    const where = enc(`${upiField}='${upi.replace(/'/g, "''")}'`);
+    parts.push("data_s=" + sel.map(id => `where:${id}:${where}`).join(","));
+  }
+  const url = base + "#" + parts.join("&");
+  console.info("Map link:", url);
+  return url;
 }
 
 const fmt = n => n.toLocaleString(undefined, { maximumFractionDigits: 1 });
@@ -206,7 +276,7 @@ function render(upi, parcelArea, visible, parcelCount, hiddenCount, mapUrl) {
 }
 
 async function run() {
-  const upi = $("upi").value.trim();
+  const upi = $("upi").value.replace(/\\/g, "/").replace(/\s+/g, "");
   if (!upi) return show("err", "Enter a UPI to search.");
   go.disabled = true;
   show("msg", "Finding the parcel and checking the master plan…");
@@ -225,7 +295,7 @@ async function run() {
     const parcel = asFeature(p.features[0].geometry);
     const parcelArea = area(parcel);
     if (!parcelArea) return show("err", "This parcel has no usable geometry.");
-    const mapUrl = buildMapUrl(upi, parcel, upiF);
+    const mapUrl = await buildMapUrl(upi, parcel, upiF);
 
     // Fast path: if one zone wholly contains the parcel, the answer is 100% and no geometry needs downloading
     const whole = await query(planLayer.url, {

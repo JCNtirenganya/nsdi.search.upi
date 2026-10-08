@@ -14,8 +14,12 @@
   #open { background:var(--accent); color:#fff; padding:12px 26px; font-size:16px; font-weight:600; }
   #open:hover, #go:hover { background:var(--accent-d); }
   button:focus-visible, input:focus-visible { outline:3px solid #7cc5b8; outline-offset:2px; }
-  #panel { margin-top:18px; padding:18px; border:1px solid var(--line); border-radius:8px; background:var(--soft); text-align:left; }
-  #panel[hidden] { display:none; }
+  #overlay { position:fixed; inset:0; z-index:10; display:flex; align-items:center; justify-content:center; padding:14px; background:rgba(12,28,26,.55); backdrop-filter:blur(2px); }
+  #overlay[hidden] { display:none; }
+  #panel { position:relative; width:100%; max-width:520px; max-height:100%; overflow:auto; padding:22px 20px 20px; border-radius:10px; background:#fff; box-shadow:0 12px 40px rgba(0,0,0,.3); text-align:left; }
+  #close { position:absolute; top:8px; right:8px; width:34px; height:34px; background:transparent; color:var(--muted); font-size:22px; line-height:1; }
+  #close:hover { background:var(--soft); color:var(--ink); }
+  h1 { font-size:17px; margin:0 0 14px; padding-right:30px; }
   label { display:block; font-weight:600; margin-bottom:6px; }
   .row { display:flex; gap:8px; }
   input { flex:1; min-width:0; padding:10px; border:1px solid var(--line); border-radius:6px; font:inherit; }
@@ -37,8 +41,12 @@
 </head>
 <body>
 <div class="wrap">
-  <button id="open" aria-expanded="false" aria-controls="panel">Check land use by UPI</button>
-  <div id="panel" hidden>
+  <button id="open" aria-haspopup="dialog">Check land use by UPI</button>
+</div>
+<div id="overlay" hidden>
+  <div id="panel" role="dialog" aria-modal="true" aria-labelledby="ttl">
+    <button id="close" aria-label="Close">&times;</button>
+    <h1 id="ttl">Land use by UPI</h1>
     <label for="upi">Parcel UPI</label>
     <div class="row">
       <input id="upi" type="text" placeholder="e.g. 1/02/03/04/0005" autocomplete="off">
@@ -91,13 +99,18 @@ function pickField(layer, wanted, label) {
 }
 
 const $ = id => document.getElementById(id);
-const openBtn = $("open"), panel = $("panel"), out = $("out"), go = $("go");
+const openBtn = $("open"), overlay = $("overlay"), out = $("out"), go = $("go");
 
-openBtn.onclick = () => {
-  panel.hidden = !panel.hidden;
-  openBtn.setAttribute("aria-expanded", String(!panel.hidden));
-  if (!panel.hidden) { $("upi").focus(); getLayer("parcels").catch(() => {}); getLayer("plan").catch(() => {}); }
-};
+function openDlg() {
+  overlay.hidden = false;
+  $("upi").focus();
+  getLayer("parcels").catch(() => {}); getLayer("plan").catch(() => {});
+}
+function closeDlg() { overlay.hidden = true; openBtn.focus(); }
+openBtn.onclick = openDlg;
+$("close").onclick = closeDlg;
+overlay.addEventListener("mousedown", e => { if (e.target === overlay) closeDlg(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !overlay.hidden) closeDlg(); });
 $("upi").addEventListener("keydown", e => { if (e.key === "Enter") run(); });
 go.onclick = run;
 

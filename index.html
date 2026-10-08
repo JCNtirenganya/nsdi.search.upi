@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Land use by UPI</title>
+<script src="https://cdn.jsdelivr.net/npm/@turf/turf@7.2.0/turf.min.js"></script>
+<style>
+  :root { --ink:#1d2b2a; --muted:#5e6f6d; --line:#d5dedc; --accent:#0f6b5e; --accent-d:#0a4f45; --bg:#ffffff; --soft:#f3f7f6; --warn:#9a3412; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px 16px; font:15px/1.5 system-ui, "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); }
+  .wrap { max-width:560px; margin:0 auto; text-align:center; }
+  button { font:inherit; cursor:pointer; border-radius:6px; border:0; }
+  #open { background:var(--accent); color:#fff; padding:12px 26px; font-size:16px; font-weight:600; }
+  #open:hover, #go:hover { background:var(--accent-d); }
+  button:focus-visible, input:focus-visible { outline:3px solid #7cc5b8; outline-offset:2px; }
+  #panel { margin-top:18px; padding:18px; border:1px solid var(--line); border-radius:8px; background:var(--soft); text-align:left; }
+  #panel[hidden] { display:none; }
+  label { display:block; font-weight:600; margin-bottom:6px; }
+  .row { display:flex; gap:8px; }
+  input { flex:1; min-width:0; padding:10px; border:1px solid var(--line); border-radius:6px; font:inherit; }
+  #go { background:var(--accent); color:#fff; padding:10px 18px; font-weight:600; }
+  #go:disabled { opacity:.6; cursor:wait; }
+  #out { margin-top:16px; }
+  .msg { color:var(--muted); }
+  .err { color:var(--warn); }
+  h2 { font-size:16px; margin:0 0 2px; }
+  .meta { color:var(--muted); font-size:13px; margin-bottom:12px; }
+  .zone { padding:10px 0; border-top:1px solid var(--line); }
+  .zone .top { display:flex; justify-content:space-between; gap:12px; font-weight:600; }
+  .zone .sub { color:var(--muted); font-size:13px; }
+  .bar { height:8px; background:#dfe9e7; border-radius:4px; margin-top:6px; overflow:hidden; }
+  .bar i { display:block; height:100%; background:var(--accent); }
+  .zone.un .bar i { background:#a8b5b3; }
+  .note { margin-top:10px; font-size:12.5px; color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <button id="open" aria-expanded="false" aria-controls="panel">Check land use by UPI</button>
+  <div id="panel" hidden>
+    <label for="upi">Parcel UPI</label>
+    <div class="row">
+      <input id="upi" type="text" placeholder="e.g. 1/02/03/04/0005" autocomplete="off">
+      <button id="go">Search</button>
+    </div>
+    <div id="out" aria-live="polite"></div>
+  </div>
+</div>
+
+<script>
+/* ============ CONFIGURE THESE ============ */
+const CONFIG = {
+  portal:     "https://rla.maps.arcgis.com",
+  parcels:    { itemId: "ebb24769dfdf4f24b18e0f8bb5569f2f", layer: 0 },   // Muhanga_Parcels
+  plan:       { itemId: "a0af647bc8dc43398f39e7e5d5987cda", layer: 0 },   // Muhanga_DLUP
+  // Optional: paste a direct layer URL (ending in /FeatureServer/0) to skip the item lookup:
+  parcelUrl:  "",
+  planUrl:    "",
+  upiField:   "UPI",
+  zoneField:  "Zoning",
+  useField:   "",           // no separate land use field; the Zoning field carries it
+  minPercent: 0.1           // pieces smaller than this are treated as topology slivers
+};
+/* ========================================= */
+
+// Resolve each layer's REST URL from its ArcGIS item ID (cached), and read its field list
+const layerCache = {};
+async function getLayer(key) {
+  if (layerCache[key]) return layerCache[key];
+  try { const c = JSON.parse(localStorage.getItem("lu_" + key)); if (c && c.url) return (layerCache[key] = c); } catch (e) {}
+  const direct = CONFIG[key === "parcels" ? "parcelUrl" : "planUrl"];
+  let url = direct;
+  if (!url) {
+    const item = CONFIG[key];
+    const r = await fetch(`${CONFIG.portal}/sharing/rest/content/items/${item.itemId}?f=json`);
+    const meta = await r.json();
+    if (meta.error || !meta.url) throw new Error("Could not read the item for " + key + ". Make sure it is shared publicly");
+    url = /\/\d+$/.test(meta.url) ? meta.url : meta.url.replace(/\/$/, "") + "/" + item.layer;
+  }
+  const info = await (await fetch(url + "?f=json")).json();
+  if (info.error) throw new Error("Layer is not accessible (" + (info.error.message || "error") + "). Make sure it is shared publicly");
+  layerCache[key] = { url, fields: (info.fields || []).map(f => f.name) };
+  try { localStorage.setItem("lu_" + key, JSON.stringify(layerCache[key])); } catch (e) {}
+  return layerCache[key];
+}
+function pickField(layer, wanted, label) {
+  const hit = layer.fields.find(f => f.toLowerCase() === wanted.toLowerCase());
+  if (!hit) throw new Error(`Field "${wanted}" not found in ${label}. Available fields: ${layer.fields.join(", ")}`);
+  return hit;
+}
+
+const $ = id => document.getElementById(id);
+const openBtn = $("open"), panel = $("panel"), out = $("out"), go = $("go");
+
+openBtn.onclick = () => {
+  panel.hidden = !panel.hidden;
+  openBtn.setAttribute("aria-expanded", String(!panel.hidden));
+  if (!panel.hidden) { $("upi").focus(); getLayer("parcels").catch(() => {}); getLayer("plan").catch(() => {}); }
+};
+$("upi").addEventListener("keydown", e => { if (e.key === "Enter") run(); });
+go.onclick = run;
+
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const show = (cls, html) => { out.innerHTML = `<div class="${cls}">${html}</div>`; };
+
+// POST avoids URL-length limits when sending a parcel geometry
+async function query(layerUrl, params) {
+  const body = new URLSearchParams({ f: "geojson", ...params });
+  const res = await fetch(layerUrl + "/query", { method: "POST", body });
+  if (!res.ok) throw new Error("Service returned HTTP " + res.status);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || "Service error");
+  return data;
+}
+
+function toEsriPolygon(geom) {
+  const polys = geom.type === "Polygon" ? [geom.coordinates] : geom.coordinates;
+  return { rings: polys.flat(), spatialReference: { wkid: 4326 } };
+}
+
+const asFeature = g => turf.feature(g);
+const area = f => (f ? turf.area(f) : 0);
+function safe(fn) { try { return fn(); } catch (e) { console.warn(e); return null; } }
+const union = (a, b) => (!a ? b : !b ? a : safe(() => turf.union(turf.featureCollection([a, b]))) || a);
+
+async function fetchAllPlan(parcelGeom, planUrl, outFields) {
+  const feats = [];
+  let offset = 0;
+  for (let i = 0; i < 20; i++) {
+    const data = await query(planUrl, {
+      where: "1=1",
+      geometry: JSON.stringify(toEsriPolygon(parcelGeom)),
+      geometryType: "esriGeometryPolygon",
+      inSR: "4326",
+      spatialRel: "esriSpatialRelIntersects",
+      outFields,
+      returnGeometry: "true",
+      maxAllowableOffset: "0.000005",   // simplify to roughly 0.5 m: far less data to download and process
+      geometryPrecision: "6",
+      resultOffset: offset
+    });
+    feats.push(...data.features);
+    const more = data.exceededTransferLimit || (data.properties && data.properties.exceededTransferLimit);
+    if (!more || !data.features.length) break;
+    offset += data.features.length;
+  }
+  return feats;
+}
+
+const fmt = n => n.toLocaleString(undefined, { maximumFractionDigits: 1 });
+function render(upi, parcelArea, visible, parcelCount, hiddenCount) {
+  out.innerHTML =
+    `<h2>UPI ${esc(upi)}</h2><div class="meta">Parcel area ${fmt(parcelArea)} m²</div>` +
+    visible.map(r => {
+      const pct = r.a / parcelArea * 100;
+      return `<div class="zone ${r.un ? "un" : ""}">
+        <div class="top"><span>${esc(r.zone)}</span><span>${pct.toFixed(1)}%</span></div>
+        ${r.use ? `<div class="sub">${esc(r.use)}</div>` : ""}
+        <div class="sub">${fmt(r.a)} m²</div>
+        <div class="bar"><i style="width:${Math.min(pct, 100)}%"></i></div></div>`;
+    }).join("") +
+    `<div class="note">Areas are calculated from the layer geometries and are indicative.` +
+    `${parcelCount > 1 ? ` ${parcelCount} parcels share this UPI; the first is shown.` : ""}` +
+    `${hiddenCount ? ` ${hiddenCount} tiny overlap(s) under ${CONFIG.minPercent}% were ignored.` : ""}</div>`;
+}
+
+async function run() {
+  const upi = $("upi").value.trim();
+  if (!upi) return show("err", "Enter a UPI to search.");
+  go.disabled = true;
+  show("msg", "Finding the parcel and checking the master plan…");
+  try {
+    const [parcelLayer, planLayer] = await Promise.all([getLayer("parcels"), getLayer("plan")]);
+    const upiF = pickField(parcelLayer, CONFIG.upiField, "the parcel layer");
+    const zoneF = pickField(planLayer, CONFIG.zoneField, "the master plan layer");
+    const useF = CONFIG.useField ? pickField(planLayer, CONFIG.useField, "the master plan layer") : "";
+    const p = await query(parcelLayer.url, {
+      where: `${upiF}='${upi.replace(/'/g, "''")}'`,
+      outFields: upiF,
+      returnGeometry: "true"
+    });
+    if (!p.features.length) return show("err", `No parcel found for UPI <b>${esc(upi)}</b>. Check the number and try again.`);
+
+    const parcel = asFeature(p.features[0].geometry);
+    const parcelArea = area(parcel);
+    if (!parcelArea) return show("err", "This parcel has no usable geometry.");
+
+    // Fast path: if one zone wholly contains the parcel, the answer is 100% and no geometry needs downloading
+    const whole = await query(planLayer.url, {
+      where: "1=1",
+      geometry: JSON.stringify(toEsriPolygon(p.features[0].geometry)),
+      geometryType: "esriGeometryPolygon",
+      inSR: "4326",
+      spatialRel: "esriSpatialRelContains",
+      outFields: [zoneF, useF].filter(Boolean).join(","),
+      returnGeometry: "false"
+    });
+    if (whole.features.length === 1) {
+      const pr = whole.features[0].properties;
+      return render(upi, parcelArea, [{ zone: pr[zoneF] ?? "Unspecified", use: useF ? (pr[useF] ?? "") : "", a: parcelArea }], p.features.length, 0);
+    }
+
+    show("msg", "Parcel spans several zones. Calculating percentages…");
+    const plan = await fetchAllPlan(p.features[0].geometry, planLayer.url, [zoneF, useF].filter(Boolean).join(","));
+    if (!plan.length) return show("err", "The parcel was found, but no master plan zone covers it.");
+
+    // Group fragments by zone + land use, merging fragments of the same zone
+    const groups = new Map();
+    const bb = turf.bbox(parcel);
+    for (const f of plan) {
+      const piece = safe(() => turf.intersect(turf.featureCollection([parcel, turf.bboxClip(asFeature(f.geometry), bb)])));
+      if (!piece) continue;
+      const zone = f.properties[zoneF] ?? "Unspecified";
+      const use = useF ? (f.properties[useF] ?? "") : "";
+      const key = zone + "|" + use;
+      const g = groups.get(key) || { zone, use, geom: null };
+      g.geom = union(g.geom, piece);
+      groups.set(key, g);
+    }
+
+    // Subtract what earlier zones already claimed so overlapping zones never push the total above 100%
+    let covered = null;
+    const rows = [];
+    for (const g of [...groups.values()].sort((a, b) => area(b.geom) - area(a.geom))) {
+      const own = covered ? (safe(() => turf.difference(turf.featureCollection([g.geom, covered]))) ) : g.geom;
+      const a = area(own);
+      covered = union(covered, g.geom);
+      if (a > 0) rows.push({ ...g, a });
+    }
+
+    const visible = rows.filter(r => r.a / parcelArea * 100 >= CONFIG.minPercent);
+    const hiddenCount = rows.length - visible.length;
+    const usedArea = Math.min(area(covered), parcelArea);
+    const unzoned = Math.max(parcelArea - usedArea, 0);
+    if (unzoned / parcelArea * 100 >= CONFIG.minPercent) visible.push({ zone: "Not covered by any zone", use: "", a: unzoned, un: true });
+    render(upi, parcelArea, visible, p.features.length, hiddenCount);
+  } catch (e) {
+    console.error(e);
+    show("err", "Could not complete the search: " + esc(e.message) + ". Check that both layers are shared publicly.");
+  } finally {
+    go.disabled = false;
+  }
+}
+</script>
+</body>
+</html>

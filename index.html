@@ -37,6 +37,8 @@
   .bar { height:8px; background:#dfe9e7; border-radius:4px; margin-top:6px; overflow:hidden; }
   .bar i { display:block; height:100%; background:var(--accent); }
   .zone.un .bar i { background:#a8b5b3; }
+  .mapbtn { display:block; margin-top:14px; padding:9px 14px; text-align:center; text-decoration:none; font-weight:600; color:var(--accent) !important; border:2px solid var(--accent); border-radius:6px; }
+  .mapbtn:hover { background:var(--accent); color:#fff !important; }
   .note { margin-top:10px; font-size:12.5px; color:var(--muted); }
 </style>
 </head>
@@ -69,7 +71,13 @@ const CONFIG = {
   upiField:   "UPI",
   zoneField:  "Zoning",
   useField:   "",           // no separate land use field; the Zoning field carries it
-  minPercent: 0.1           // pieces smaller than this are treated as topology slivers
+  minPercent: 0.1,          // pieces smaller than this are treated as topology slivers
+
+  // "View on map" button -> your Experience Builder app
+  expUrl:          "https://experience.arcgis.com/experience/19333efca3744cf3ab27ba4da073d49f",
+  expDataSourceId: "",      // BEST: parcel data source ID in the app (selects + zooms to the parcel). See notes.
+  expMapWidgetId:  "map_1", // FALLBACK: map widget ID in the app (map_1 is the default); zooms to the parcel's centre
+  expTarget:       "_blank" // "_blank" = new tab, "_top" = replace the whole page
 };
 /* ========================================= */
 
@@ -162,8 +170,25 @@ async function fetchAllPlan(parcelGeom, planUrl, outFields) {
   return feats;
 }
 
+function buildMapUrl(upi, parcel, upiField) {
+  const base = CONFIG.expUrl.replace(/\/$/, "") + "/";
+  if (CONFIG.expDataSourceId) {
+    const w = `where:${CONFIG.expDataSourceId}:${upiField}="${upi.replace(/"/g, "")}"`;
+    return base + "#data_s=" + encodeURIComponent(w) + "&zoom_to_selection=true";
+  }
+  if (CONFIG.expMapWidgetId) {
+    const [x, y] = turf.centroid(parcel).geometry.coordinates;
+    const [minX, minY, maxX, maxY] = turf.bbox(parcel);
+    const size = Math.max(turf.distance([minX, minY], [maxX, minY]), turf.distance([minX, minY], [minX, maxY])) * 1000; // metres
+    const scale = size < 50 ? 1000 : size < 200 ? 2500 : size < 500 ? 5000 : size < 1500 ? 10000 : 25000;
+    const vp = { rotation: 0, scale, targetGeometry: { spatialReference: { wkid: 4326 }, x, y } };
+    return base + "#" + CONFIG.expMapWidgetId + "=viewpoint:" + encodeURIComponent(JSON.stringify(vp));
+  }
+  return base;
+}
+
 const fmt = n => n.toLocaleString(undefined, { maximumFractionDigits: 1 });
-function render(upi, parcelArea, visible, parcelCount, hiddenCount) {
+function render(upi, parcelArea, visible, parcelCount, hiddenCount, mapUrl) {
   out.innerHTML =
     `<h2>UPI ${esc(upi)}</h2><div class="meta">Parcel area ${fmt(parcelArea)} m²</div>` +
     visible.map(r => {
@@ -174,6 +199,7 @@ function render(upi, parcelArea, visible, parcelCount, hiddenCount) {
         <div class="sub">${fmt(r.a)} m²</div>
         <div class="bar"><i style="width:${Math.min(pct, 100)}%"></i></div></div>`;
     }).join("") +
+    `<a class="mapbtn" href="${esc(mapUrl)}" target="${CONFIG.expTarget}" rel="noopener">View this parcel on the map</a>` +
     `<div class="note">Areas are calculated from the layer geometries and are indicative.` +
     `${parcelCount > 1 ? ` ${parcelCount} parcels share this UPI; the first is shown.` : ""}` +
     `${hiddenCount ? ` ${hiddenCount} tiny overlap(s) under ${CONFIG.minPercent}% were ignored.` : ""}</div>`;
@@ -199,6 +225,7 @@ async function run() {
     const parcel = asFeature(p.features[0].geometry);
     const parcelArea = area(parcel);
     if (!parcelArea) return show("err", "This parcel has no usable geometry.");
+    const mapUrl = buildMapUrl(upi, parcel, upiF);
 
     // Fast path: if one zone wholly contains the parcel, the answer is 100% and no geometry needs downloading
     const whole = await query(planLayer.url, {
@@ -212,7 +239,7 @@ async function run() {
     });
     if (whole.features.length === 1) {
       const pr = whole.features[0].properties;
-      return render(upi, parcelArea, [{ zone: pr[zoneF] ?? "Unspecified", use: useF ? (pr[useF] ?? "") : "", a: parcelArea }], p.features.length, 0);
+      return render(upi, parcelArea, [{ zone: pr[zoneF] ?? "Unspecified", use: useF ? (pr[useF] ?? "") : "", a: parcelArea }], p.features.length, 0, mapUrl);
     }
 
     show("msg", "Parcel spans several zones. Calculating percentages…");
@@ -248,7 +275,7 @@ async function run() {
     const usedArea = Math.min(area(covered), parcelArea);
     const unzoned = Math.max(parcelArea - usedArea, 0);
     if (unzoned / parcelArea * 100 >= CONFIG.minPercent) visible.push({ zone: "Not covered by any zone", use: "", a: unzoned, un: true });
-    render(upi, parcelArea, visible, p.features.length, hiddenCount);
+    render(upi, parcelArea, visible, p.features.length, hiddenCount, mapUrl);
   } catch (e) {
     console.error(e);
     show("err", "Could not complete the search: " + esc(e.message) + ". Check that both layers are shared publicly.");

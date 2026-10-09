@@ -6,7 +6,8 @@
       background:#f3f7f6; border:1px solid #cfdcd9; border-left:5px solid var(--accent); border-radius:8px;
       box-shadow:0 12px 40px rgba(0,0,0,.3); }
     .upi-panel * { box-sizing:border-box; }
-    .upi-title { font-size:15px; font-weight:700; margin:0 0 10px; padding-right:30px; color:var(--ink); }
+    .upi-title { font-size:15px; font-weight:400; margin:0 0 10px; padding-right:30px; color:var(--ink); }
+    .upi-title b, .upi-panel label b { font-weight:700; }
     .upi-close { position:absolute; top:6px; right:6px; width:32px; height:32px; border:0; border-radius:6px;
       background:transparent; color:var(--muted); font-size:22px; line-height:1; cursor:pointer; padding:0; }
     .upi-close:hover { background:#dce9e6; color:var(--ink); }
@@ -38,8 +39,8 @@
   </style>
 
   <button type="button" class="upi-close" data-dismiss="modal" aria-label="Close">&times;</button>
-  <h2 class="upi-title">Icyo Ubutaka Bwagenewe/Planned Use</h2>
-  <label for="upiInput">Shyiramo UPI/Type the UPI</label>
+  <h2 class="upi-title"><b>Icyo Ubutaka Bwagenewe</b>/Planned Use</h2>
+  <label for="upiInput"><b>Shyiramo UPI</b>/Type the UPI</label>
   <div class="upi-row">
     <input class="upi-input" id="upiInput" type="text" placeholder="e.g. 1/02/03/04/0005" autocomplete="off">
     <button class="upi-go" id="upiGo" type="button">Search</button>

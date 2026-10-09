@@ -1,3 +1,4 @@
+<!-- Chat panel. Host on GitHub Pages next to index.html; the Hub's Bootstrap modal loads it. -->
 <div class="rsdi-chat__panel" id="rsdiChatPanel">
   <style>
     .rsdi-chat__panel { --c-main:#0b4f8a; --c-accent:#f2b705; --c-bg:#fff; --c-text:#1d2a36; --c-line:#dde3e9;
@@ -71,8 +72,12 @@
 
     add(CONFIG.greeting, 'bot');
 
+    // Modal behaviour: close the parcel search when this opens, and focus the box
     if (window.jQuery) {
-      jQuery('#rsdiChatModal').on('shown.bs.modal', function () { input.focus(); });
+      var jq = window.jQuery;
+      var hideUpi = function () { var u = jq('#rsdiUpiModal'); if (u.hasClass('in')) u.modal('hide'); };
+      hideUpi();
+      jq('#rsdiChatModal').on('show.bs.modal', hideUpi).on('shown.bs.modal', function () { input.focus(); });
       input.focus();
     }
 
